@@ -36,5 +36,5 @@ async def get_reputation(profile_id: UUID):
         totalReviews=row["total_reviews"],
         allTags=all_tags,
         summary=row["summary"],
-        createdAt=row["updated_at"],
+        updatedAt=row["updated_at"],  # M6: was createdAt, now correctly named
     )

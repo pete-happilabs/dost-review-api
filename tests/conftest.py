@@ -1,6 +1,5 @@
 import pytest
 import pytest_asyncio
-import asyncpg
 
 from app.database import run_migrations, create_pool, close_pool
 

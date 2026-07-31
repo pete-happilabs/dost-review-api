@@ -87,3 +87,92 @@ async def test_submit_dost_event_envelope(client):
     resp = await client.post("/api/v1/reviews", json=envelope)
     assert resp.status_code == 201
     assert resp.json()["status"] == "GATED"
+
+
+# H4: Malformed body tests
+@pytest.mark.asyncio
+async def test_submit_non_json_body(client):
+    resp = await client.post(
+        "/api/v1/reviews",
+        content=b"not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_submit_json_array_body(client):
+    resp = await client.post("/api/v1/reviews", json=[1, 2, 3])
+    assert resp.status_code == 400
+
+
+# Envelope failure tests
+@pytest.mark.asyncio
+async def test_submit_envelope_bad_base64(client):
+    envelope = {
+        "eventType": "MSG_START",
+        "eventId": str(uuid4()),
+        "encryptedEvent": "not-valid-base64!!!",
+    }
+    resp = await client.post("/api/v1/reviews", json=envelope)
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_submit_envelope_missing_text(client):
+    inner = {"message": {}}
+    encrypted = base64.b64encode(json.dumps(inner).encode()).decode()
+    envelope = {
+        "eventType": "MSG_START",
+        "eventId": str(uuid4()),
+        "encryptedEvent": encrypted,
+    }
+    resp = await client.post("/api/v1/reviews", json=envelope)
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_submit_envelope_invalid_event_id(client):
+    review_data = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "Good",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    inner = {"message": {"text": json.dumps(review_data)}}
+    encrypted = base64.b64encode(json.dumps(inner).encode()).decode()
+    envelope = {
+        "eventType": "MSG_START",
+        "eventId": "not-a-uuid",
+        "encryptedEvent": encrypted,
+    }
+    resp = await client.post("/api/v1/reviews", json=envelope)
+    assert resp.status_code == 400
+
+
+# Rate limit test at API level
+@pytest.mark.asyncio
+async def test_submit_rate_limited(client):
+    target = str(uuid4())
+    rater = str(uuid4())
+    for i in range(5):
+        body = {
+            "reviewId": str(uuid4()),
+            "targetProfileId": target,
+            "raterProfileId": rater,
+            "reviewText": f"Review number {i+1}",
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
+        resp = await client.post("/api/v1/reviews", json=body)
+        assert resp.status_code == 201
+    # 6th should be 429
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": target,
+        "raterProfileId": rater,
+        "reviewText": "One too many",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 429

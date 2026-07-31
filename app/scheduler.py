@@ -1,36 +1,26 @@
-import json
-from uuid import uuid4
+"""M2: Uses shared execute_batch instead of duplicating batch logic.
+M8: Timezone explicitly set to UTC.
+"""
+import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.batch_engine import run_batch
+from app.batch_runner import execute_batch
 from app.config import settings
-from app.database import get_pool
 
-scheduler = AsyncIOScheduler()
+logger = logging.getLogger(__name__)
+
+scheduler = AsyncIOScheduler(timezone=settings.batch_timezone)
 
 
 async def _scheduled_batch() -> None:
-    pool = get_pool()
-    batch_id = uuid4()
-    await pool.execute(
-        "INSERT INTO batch_run (id, status, started_at) VALUES ($1, 'RUNNING', NOW())",
-        batch_id,
-    )
-    try:
-        stats = await run_batch(pool, batch_id)
-        await pool.execute(
-            "UPDATE batch_run SET status = 'COMPLETED', stats = $1::jsonb, completed_at = NOW() "
-            "WHERE id = $2",
-            json.dumps(stats), batch_id,
-        )
-    except Exception as e:
-        await pool.execute(
-            "UPDATE batch_run SET status = 'FAILED', stats = $1::jsonb, completed_at = NOW() "
-            "WHERE id = $2",
-            json.dumps({"error": str(e)}), batch_id,
-        )
+    logger.info("Scheduled batch starting")
+    batch_id, status = await execute_batch()
+    if status == "ALREADY_RUNNING":
+        logger.info("Scheduled batch skipped — batch %s already running", batch_id)
+    else:
+        logger.info("Scheduled batch %s completed", batch_id)
 
 
 def start_scheduler() -> None:
@@ -39,6 +29,8 @@ def start_scheduler() -> None:
         CronTrigger.from_crontab(settings.batch_cadence_cron),
         id="daily_batch",
         replace_existing=True,
+        misfire_grace_time=300,  # M8: 5 min grace for missed fires after deploy
+        coalesce=True,  # M8: Coalesce missed fires into one run
     )
     scheduler.start()
 

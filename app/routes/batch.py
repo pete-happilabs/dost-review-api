@@ -1,42 +1,31 @@
 import json
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 
-from app.batch_engine import run_batch
+from app.batch_runner import execute_batch
 from app.database import get_pool
 from app.models import BatchStatus
 
 router = APIRouter(prefix="/api/v1")
 
 
-async def _run_batch_task(batch_id: UUID) -> None:
-    pool = get_pool()
-    try:
-        stats = await run_batch(pool, batch_id)
-        await pool.execute(
-            "UPDATE batch_run SET status = 'COMPLETED', stats = $1::jsonb, completed_at = NOW() "
-            "WHERE id = $2",
-            json.dumps(stats), batch_id,
-        )
-    except Exception as e:
-        await pool.execute(
-            "UPDATE batch_run SET status = 'FAILED', stats = $1::jsonb, completed_at = NOW() "
-            "WHERE id = $2",
-            json.dumps({"error": str(e)}), batch_id,
-        )
-
-
 @router.post("/batch/trigger", status_code=202)
-async def trigger_batch(background_tasks: BackgroundTasks):
-    pool = get_pool()
-    batch_id = uuid4()
-    await pool.execute(
-        "INSERT INTO batch_run (id, status, started_at) VALUES ($1, 'RUNNING', NOW())",
-        batch_id,
-    )
-    background_tasks.add_task(_run_batch_task, batch_id)
-    return {"batchId": str(batch_id), "status": "RUNNING", "message": "Batch processing started."}
+async def trigger_batch():
+    # C2: execute_batch checks for concurrent RUNNING batch
+    batch_id, status = await execute_batch()
+
+    if status == "ALREADY_RUNNING":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Batch {batch_id} is already running",
+        )
+
+    return {
+        "batchId": str(batch_id),
+        "status": "RUNNING",
+        "message": "Batch processing started.",
+    }
 
 
 @router.get("/batch/status/{batch_id}", response_model=BatchStatus)

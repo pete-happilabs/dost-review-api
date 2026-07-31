@@ -41,4 +41,6 @@ async def test_get_reputation_found(client):
     assert "on-time-delivery" in data["allTags"]
     assert data["allTags"]["on-time-delivery"]["weight"] == 28
     assert data["allTags"]["on-time-delivery"]["score"] == 4.1
-    assert data["allTags"]["late"]["score"] is None  # no score for non-top tags
+    assert data["allTags"]["late"]["score"] is None
+    # M6: Field is now updatedAt
+    assert "updatedAt" in data

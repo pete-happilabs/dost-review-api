@@ -9,3 +9,4 @@ __pycache__/
 CLAUDE.md
 AGENTS.md
 .superpowers/
+dost_review_api.egg-info/

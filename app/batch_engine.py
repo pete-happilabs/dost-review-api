@@ -1,5 +1,6 @@
 import importlib
 import json
+import logging
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -9,6 +10,8 @@ from uuid import UUID
 import asyncpg
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _load_engine():
@@ -80,6 +83,10 @@ async def run_batch(pool: asyncpg.Pool, batch_id: UUID) -> dict[str, Any]:
                 stored_state = json.loads(raw) if isinstance(raw, str) else raw
 
             # Build engine input
+            # NOTE: rater_weight is stored in the review table but the engine's
+            # current input format ({"description", "createdAt"}) does not accept it.
+            # When the engine adds raterWeight support, add it here:
+            #   "raterWeight": float(r["rater_weight"])
             engine_input: dict[str, Any] = {
                 "profileId": str(profile_id),
                 "about": "",
@@ -98,6 +105,10 @@ async def run_batch(pool: asyncpg.Pool, batch_id: UUID) -> dict[str, Any]:
             output, _metrics = process_reputation(engine_input)
 
             if "error" in output:
+                logger.warning(
+                    "Engine error for profile %s: %s",
+                    profile_id, output["error"].get("message", "unknown"),
+                )
                 stats["failed"] += len(review_rows)
                 continue
 
@@ -134,6 +145,7 @@ async def run_batch(pool: asyncpg.Pool, batch_id: UUID) -> dict[str, Any]:
             stats["profilesUpdated"] += 1
 
         except Exception:
+            logger.exception("Batch failed for profile %s", profile_id)
             stats["failed"] += len(review_rows)
 
     return stats

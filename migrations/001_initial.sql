@@ -14,10 +14,11 @@ CREATE TABLE IF NOT EXISTS review (
 
 CREATE INDEX IF NOT EXISTS idx_review_target_status
     ON review(target_profile_id, status);
-CREATE INDEX IF NOT EXISTS idx_review_rate_limit
-    ON review(rater_profile_id, target_profile_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_review_batch_pickup
-    ON review(status, created_at);
+-- idx_review_rate_limit and idx_review_batch_pickup (on created_at) were
+-- superseded by the received_at indexes in 003. Since every file re-runs on
+-- every startup, creating them here meant a full index build on `review` at
+-- each boot only for 003 to drop them again — so they are gone from 001;
+-- 003 keeps the DROPs for databases that already have them.
 
 CREATE TABLE IF NOT EXISTS profile_reputation (
     profile_id       UUID PRIMARY KEY,

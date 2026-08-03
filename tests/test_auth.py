@@ -45,6 +45,16 @@ async def test_correct_key_accepted(client, guard_key):
 
 
 @pytest.mark.asyncio
+async def test_non_ascii_key_rejected_cleanly(client, guard_key):
+    """compare_digest on str requires ASCII — a header byte >= 0x80 used to
+    raise TypeError and surface as a 500 instead of a 401."""
+    resp = await client.get(
+        f"/api/v1/reputation/{uuid4()}", headers={b"X-Access-Key": b"caf\xe9-key"}
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_health_is_public(client, guard_key):
     resp = await client.get("/health")
     assert resp.status_code == 200

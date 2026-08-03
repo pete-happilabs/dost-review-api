@@ -4,6 +4,12 @@ services:
     ports:
       - "8013:8013"
     env_file: .env
+    # .env holds host-oriented values (localhost:5433, a host ENGINE_PATH) that
+    # would override the image's ENV inside the container — pin the two
+    # container-scoped settings here (environment beats env_file in compose).
+    environment:
+      DATABASE_URL: postgresql://dost:dost@postgres:5432/dost_reviews
+      ENGINE_PATH: /engine
     depends_on:
       postgres:
         condition: service_healthy

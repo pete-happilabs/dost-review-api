@@ -26,7 +26,11 @@ async def verify_guard_key(request: Request) -> None:
         return
 
     provided = request.headers.get("X-Access-Key", "")
-    # Constant-time comparison — a plain != leaks key prefix length via timing
-    if not secrets.compare_digest(provided, settings.guard_access_key):
+    # Constant-time comparison — a plain != leaks key prefix length via timing.
+    # Compare as bytes: compare_digest on str requires ASCII, so a header with
+    # a byte >= 0x80 would raise TypeError and surface as a 500 instead of 401.
+    if not secrets.compare_digest(
+        provided.encode("utf-8"), settings.guard_access_key.encode("utf-8")
+    ):
         logger.warning("Unauthorized request to %s from %s", request.url.path, request.client)
         raise HTTPException(status_code=401, detail="Invalid or missing access key")

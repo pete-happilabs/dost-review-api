@@ -6,7 +6,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.batch_engine import run_batch, _merge_tags
-from app.batch_runner import sweep_stale_batches
+from app.batch_runner import run_batch_to_completion, sweep_stale_batches
 from app.database import get_pool
 
 
@@ -203,6 +203,61 @@ async def test_sweep_requeues_orphaned_processing_reviews():
 
     assert await pool.fetchval(
         "SELECT status FROM batch_run WHERE id = $1", stale_batch
+    ) == "FAILED"
+    assert await pool.fetchval(
+        "SELECT status FROM review WHERE id = $1", review_id
+    ) == "GATED"
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_dead_letters():
+    """H3: a review that keeps failing with willRetry=True must still be
+    dead-lettered once retry_count reaches max_review_retries."""
+    pool = get_pool()
+    target = uuid4()
+    await pool.execute(
+        "INSERT INTO review (id, target_profile_id, rater_profile_id, rater_weight, "
+        "review_text, status, created_at, received_at, retry_count) "
+        "VALUES ($1, $2, $3, 1.00, 'poison pill', 'GATED', NOW(), NOW(), 2)",
+        uuid4(), target, uuid4(),
+    )
+
+    with patch("app.batch_engine._engine_fn", _mock_engine_failure):
+        stats = await run_batch(pool, uuid4())
+
+    assert stats["deadLettered"] == 1
+    row = await pool.fetchrow(
+        "SELECT status, retry_count FROM review WHERE target_profile_id = $1", target
+    )
+    assert row["status"] == "FAILED"
+    assert row["retry_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_requeues_processing_reviews():
+    """A batch whose run_batch throws mid-loop is marked FAILED — the stale
+    sweep only rescues RUNNING batches, so its PROCESSING reviews must be
+    requeued by the failure path itself or they're stranded forever."""
+    pool = get_pool()
+    batch_id = uuid4()
+    await pool.execute(
+        "INSERT INTO batch_run (id, status, started_at) VALUES ($1, 'RUNNING', NOW())",
+        batch_id,
+    )
+    review_id = uuid4()
+    await pool.execute(
+        "INSERT INTO review (id, target_profile_id, rater_profile_id, rater_weight, "
+        "review_text, status, batch_id, created_at, received_at) "
+        "VALUES ($1, $2, $3, 1.00, 'claimed then crashed', 'PROCESSING', $4, NOW(), NOW())",
+        review_id, uuid4(), uuid4(), batch_id,
+    )
+
+    with patch("app.batch_runner.run_batch", side_effect=RuntimeError("boom")):
+        status = await run_batch_to_completion(batch_id)
+
+    assert status == "FAILED"
+    assert await pool.fetchval(
+        "SELECT status FROM batch_run WHERE id = $1", batch_id
     ) == "FAILED"
     assert await pool.fetchval(
         "SELECT status FROM review WHERE id = $1", review_id

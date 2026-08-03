@@ -38,6 +38,17 @@ async def gate_and_store(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # Serialize concurrent submissions for the same (rater, target) pair:
+            # under READ COMMITTED the count-then-insert below is racy — N
+            # parallel requests could each see count < limit and all insert,
+            # bypassing the rate limit entirely. The xact lock releases on
+            # commit/rollback; other pairs are unaffected (modulo hash collisions,
+            # which only cost a moment of serialization).
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))",
+                str(review.raterProfileId), str(review.targetProfileId),
+            )
+
             # 2. Duplicate check — GATE_REJECTED rows don't block resubmission
             existing_status = await conn.fetchval(
                 "SELECT status FROM review WHERE id = $1", review.reviewId

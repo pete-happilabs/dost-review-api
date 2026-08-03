@@ -27,19 +27,26 @@ async def start_batch() -> tuple[UUID, bool]:
     pool = get_pool()
     await sweep_stale_batches(pool)
 
-    # C2: Check for existing RUNNING batch — prevent concurrent runs
-    running = await pool.fetchval(
-        "SELECT id FROM batch_run WHERE status = 'RUNNING' LIMIT 1"
-    )
-    if running:
-        logger.info("Batch already running: %s", running)
-        return running, False
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # C2: check-then-insert must be atomic — a manual trigger racing the
+            # cron job could otherwise both see "no RUNNING batch" and insert
+            # two RUNNING rows. The xact lock serializes starters; it releases
+            # on commit so it never outlives this transaction.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('batch_run:start', 0))")
 
-    batch_id = uuid4()
-    await pool.execute(
-        "INSERT INTO batch_run (id, status, started_at) VALUES ($1, 'RUNNING', NOW())",
-        batch_id,
-    )
+            running = await conn.fetchval(
+                "SELECT id FROM batch_run WHERE status = 'RUNNING' LIMIT 1"
+            )
+            if running:
+                logger.info("Batch already running: %s", running)
+                return running, False
+
+            batch_id = uuid4()
+            await conn.execute(
+                "INSERT INTO batch_run (id, status, started_at) VALUES ($1, 'RUNNING', NOW())",
+                batch_id,
+            )
     return batch_id, True
 
 
@@ -65,6 +72,19 @@ async def run_batch_to_completion(batch_id: UUID) -> str:
             )
         except Exception:
             logger.exception("Failed to update batch_run status for %s", batch_id)
+        # An exception escaping run_batch's per-profile handler leaves the
+        # not-yet-handled reviews stuck in PROCESSING. The stale sweep only
+        # rescues RUNNING batches — this one is now FAILED — so without this
+        # requeue those reviews would never be picked up again.
+        try:
+            requeued = await pool.execute(
+                "UPDATE review SET status = 'GATED' "
+                "WHERE status = 'PROCESSING' AND batch_id = $1",
+                batch_id,
+            )
+            logger.warning("Requeued orphaned reviews for failed batch %s: %s", batch_id, requeued)
+        except Exception:
+            logger.exception("Failed to requeue PROCESSING reviews for batch %s", batch_id)
         return "FAILED"
 
 

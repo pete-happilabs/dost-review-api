@@ -209,3 +209,88 @@ async def test_validation_error_names_the_field(client):
     assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert any("reviewText" in d["field"] for d in detail)
+
+
+@pytest.mark.asyncio
+async def test_submit_future_date_rejected(client):
+    """createdAt more than 1 hour in the future should be rejected."""
+    from datetime import timedelta
+
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "Time traveler review",
+        "createdAt": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert any("future" in str(d).lower() for d in detail)
+
+
+@pytest.mark.asyncio
+async def test_submit_ancient_date_rejected(client):
+    """createdAt more than 1 year in the past should be rejected."""
+    from datetime import timedelta
+
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "Ancient review",
+        "createdAt": (datetime.now(timezone.utc) - timedelta(days=400)).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert any("past" in str(d).lower() or "year" in str(d).lower() for d in detail)
+
+
+@pytest.mark.asyncio
+async def test_submit_multimedia_over_10_items(client):
+    """Multimedia list capped at 10 items."""
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "Too many photos",
+        "multimedia": [{"type": "image", "url": f"https://example.com/{i}.jpg"} for i in range(11)],
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_submit_multimedia_over_100kb(client):
+    """Multimedia payload over 100KB serialized should be rejected."""
+    big_item = {"type": "image", "data": "x" * 120_000}
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "Huge multimedia",
+        "multimedia": [big_item],
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_submit_valid_multimedia_accepted(client):
+    """A valid multimedia list under limits should be accepted."""
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "Photos attached",
+        "multimedia": [
+            {"type": "image", "url": "https://example.com/photo1.jpg"},
+            {"type": "image", "url": "https://example.com/photo2.jpg"},
+        ],
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 201

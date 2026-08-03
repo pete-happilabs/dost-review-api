@@ -176,3 +176,36 @@ async def test_submit_rate_limited(client):
     }
     resp = await client.post("/api/v1/reviews", json=body)
     assert resp.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_submit_naive_datetime_accepted(client):
+    """A createdAt without timezone info previously raised an aware-vs-naive
+    TypeError inside the validator and surfaced as an opaque 400 — it is now
+    interpreted as UTC."""
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "No timezone on my clock",
+        "createdAt": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_validation_error_names_the_field(client):
+    """Q2 follow-up: rejections should say which field failed, not just
+    'Invalid review payload'."""
+    body = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "",  # invalid: min_length=1
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert any("reviewText" in d["field"] for d in detail)

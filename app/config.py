@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     guard_access_key: str = ""
     # H3: Max retries before dead-lettering a review
     max_review_retries: int = 3
+    # H3: RUNNING batches older than this are considered dead (process crashed)
+    # and get swept — their PROCESSING reviews are requeued as GATED.
+    stale_batch_after_minutes: int = 60
     # M8: Batch scheduler timezone
     batch_timezone: str = "UTC"
 

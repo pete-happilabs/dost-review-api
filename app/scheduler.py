@@ -20,7 +20,8 @@ async def _scheduled_batch() -> None:
     if status == "ALREADY_RUNNING":
         logger.info("Scheduled batch skipped — batch %s already running", batch_id)
     else:
-        logger.info("Scheduled batch %s completed", batch_id)
+        # Log the real outcome — this previously said "completed" even on FAILED
+        logger.info("Scheduled batch %s finished with status %s", batch_id, status)
 
 
 def start_scheduler() -> None:

@@ -1,5 +1,7 @@
 """C1: Guard access key authentication middleware."""
 import logging
+import secrets
+
 from fastapi import HTTPException, Request
 
 from app.config import settings
@@ -24,6 +26,7 @@ async def verify_guard_key(request: Request) -> None:
         return
 
     provided = request.headers.get("X-Access-Key", "")
-    if provided != settings.guard_access_key:
+    # Constant-time comparison — a plain != leaks key prefix length via timing
+    if not secrets.compare_digest(provided, settings.guard_access_key):
         logger.warning("Unauthorized request to %s from %s", request.url.path, request.client)
         raise HTTPException(status_code=401, detail="Invalid or missing access key")

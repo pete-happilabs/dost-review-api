@@ -1,7 +1,7 @@
 import logging
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 
 from app.database import get_pool
 from app.event_parser import EnvelopeError, parse_event_envelope
@@ -36,8 +36,20 @@ async def submit_review(request: Request):
     else:
         try:
             review = DostReview(**body)
-        except Exception as e:
-            # Q2: Don't leak full Pydantic error internals
+        except ValidationError as e:
+            # Q2: Don't leak raw Pydantic internals, but DO tell callers which
+            # field failed — a bare "Invalid review payload" is undebuggable.
+            raise HTTPException(
+                status_code=400,
+                detail=[
+                    {
+                        "field": ".".join(str(loc) for loc in err["loc"]),
+                        "message": err["msg"],
+                    }
+                    for err in e.errors()
+                ],
+            )
+        except Exception:
             raise HTTPException(status_code=400, detail="Invalid review payload")
 
     pool = get_pool()

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from app.batch_engine import run_batch, _merge_tags
+from app.batch_runner import sweep_stale_batches
 from app.database import get_pool
 
 
@@ -176,3 +177,47 @@ async def test_batch_engine_input_shape():
     assert "description" in review  # NOT "reviewText"
     assert "createdAt" in review
     assert "about" in captured_input
+
+
+@pytest.mark.asyncio
+async def test_sweep_requeues_orphaned_processing_reviews():
+    """H3 regression: a crash mid-batch left claimed reviews stuck in
+    PROCESSING forever — pickup only selects GATED, so they were silently
+    lost. The sweep must both fail the stale batch AND requeue its reviews."""
+    pool = get_pool()
+    stale_batch = uuid4()
+    await pool.execute(
+        "INSERT INTO batch_run (id, status, started_at) "
+        "VALUES ($1, 'RUNNING', NOW() - INTERVAL '2 hours')",
+        stale_batch,
+    )
+    review_id = uuid4()
+    await pool.execute(
+        "INSERT INTO review (id, target_profile_id, rater_profile_id, rater_weight, "
+        "review_text, status, batch_id, created_at, received_at) "
+        "VALUES ($1, $2, $3, 1.00, 'orphaned', 'PROCESSING', $4, NOW(), NOW())",
+        review_id, uuid4(), uuid4(), stale_batch,
+    )
+
+    await sweep_stale_batches(pool)
+
+    assert await pool.fetchval(
+        "SELECT status FROM batch_run WHERE id = $1", stale_batch
+    ) == "FAILED"
+    assert await pool.fetchval(
+        "SELECT status FROM review WHERE id = $1", review_id
+    ) == "GATED"
+
+
+@pytest.mark.asyncio
+async def test_sweep_leaves_fresh_running_batch_alone():
+    pool = get_pool()
+    fresh_batch = uuid4()
+    await pool.execute(
+        "INSERT INTO batch_run (id, status, started_at) VALUES ($1, 'RUNNING', NOW())",
+        fresh_batch,
+    )
+    await sweep_stale_batches(pool)
+    assert await pool.fetchval(
+        "SELECT status FROM batch_run WHERE id = $1", fresh_batch
+    ) == "RUNNING"

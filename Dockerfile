@@ -5,7 +5,9 @@ RUN groupadd -r dost && useradd -r -g dost dost
 
 WORKDIR /app
 
-# Install deps first (layer cache)
+# Install deps first (layer cache). Note: at this point the source isn't copied
+# yet, so this step only resolves dependencies — the dost-review-api dist it
+# builds contains no packages.
 COPY pyproject.toml .
 RUN pip install --no-cache-dir . && rm -rf /root/.cache
 
@@ -15,6 +17,11 @@ COPY vendor/engine.py /engine/engine.py
 # Copy app code
 COPY app/ app/
 COPY migrations/ migrations/
+
+# Q3: Re-install now that app/ exists so the installed package actually contains
+# the code (previously the app was only importable via WORKDIR being on sys.path,
+# and the installed dist was an empty decoy). --no-deps keeps this layer fast.
+RUN pip install --no-cache-dir --no-deps --force-reinstall .
 
 ENV ENGINE_PATH=/engine
 EXPOSE 8013

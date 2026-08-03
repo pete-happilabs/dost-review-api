@@ -29,6 +29,14 @@ async def lifespan(app: FastAPI):
     if not settings.anthropic_api_key:
         logger.warning("ANTHROPIC_API_KEY is not set — batch processing will fail")
 
+    # C1: Auth fails OPEN when no key is configured (dev convenience) — make
+    # that state impossible to miss in logs so it never reaches production silently.
+    if not settings.guard_access_key:
+        logger.warning(
+            "GUARD_ACCESS_KEY is not set — API authentication is DISABLED; "
+            "all endpoints are open"
+        )
+
     pool = await create_pool(settings.database_url)
     await run_migrations(pool)
 

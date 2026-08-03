@@ -9,7 +9,6 @@ import importlib
 import importlib.util  # H2: explicit import — don't rely on transitive
 import json
 import logging
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any

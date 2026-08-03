@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -22,10 +23,23 @@ class DostReview(BaseModel):
             raise ValueError("reviewText must not be blank")
         return v
 
+    # M7: max_length caps the item count but not the payload — a single item
+    # could still be megabytes of JSON stored verbatim into JSONB.
+    @field_validator("multimedia")
+    @classmethod
+    def multimedia_not_huge(cls, v: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if v is not None and len(json.dumps(v)) > 100_000:
+            raise ValueError("multimedia payload too large (max 100KB serialized)")
+        return v
+
     # C3: Reject far-future or ancient dates
     @field_validator("createdAt")
     @classmethod
     def reasonable_date(cls, v: datetime) -> datetime:
+        # A naive timestamp used to hit an aware-vs-naive TypeError below and
+        # surface as an opaque 400 — treat naive as UTC instead.
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         if v > now + timedelta(hours=1):
             raise ValueError("createdAt cannot be in the future")

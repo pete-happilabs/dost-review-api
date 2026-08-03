@@ -34,5 +34,14 @@ API available at `http://localhost:8013`.
 ```bash
 pip install -e ".[dev]"
 docker compose up -d postgres
-pytest tests/ -v
+pytest tests/ -v    # 44 tests
 ```
+
+## Auth
+
+All endpoints except `/health`, `/ready`, `/docs`, `/redoc`, and `/openapi.json` require an `X-Access-Key` header. Set `GUARD_ACCESS_KEY` in `.env` to enable (leave empty to disable).
+
+## Status
+
+- 44 tests passing (3 rounds of code review complete)
+- CI via GitHub Actions (Postgres service + pytest on push/PR)

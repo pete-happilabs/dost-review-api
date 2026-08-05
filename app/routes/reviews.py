@@ -57,9 +57,20 @@ async def submit_review(request: Request):
     result = await gate_and_store(review, pool, event_id)
 
     if not result.passed:
-        status_code = {"SELF_REVIEW": 400, "DUPLICATE": 409, "RATE_LIMITED": 429}.get(
-            result.error_code, 400
-        )
+        # Profile-validation codes are mapped explicitly rather than falling through
+        # to the 400 default: the payload is well-formed (valid UUIDs, valid text) but
+        # names profiles that cannot be reviewed, which is 422, and callers/dashboards
+        # need to tell that apart from a malformed body. 404 would be misleading —
+        # the endpoint exists; it is a body-referenced entity that does not.
+        status_code = {
+            "SELF_REVIEW": 400,
+            "DUPLICATE": 409,
+            "RATE_LIMITED": 429,
+            "TARGET_NOT_FOUND": 422,
+            "TARGET_INACTIVE": 422,
+            "RATER_NOT_FOUND": 422,
+            "RATER_INACTIVE": 422,
+        }.get(result.error_code, 400)
         raise HTTPException(status_code=status_code, detail=result.message)
 
     return ReviewResponse(

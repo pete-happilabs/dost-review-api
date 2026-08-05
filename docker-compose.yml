@@ -10,6 +10,10 @@ services:
     environment:
       DATABASE_URL: postgresql://dost:dost@postgres:5432/dost_reviews
       ENGINE_PATH: /engine
+      # Same reason: a host-oriented ONBOARD_DATABASE_URL from .env resolves to the
+      # container itself, not the Onboard DB. Pinned empty so compose runs with
+      # validation disabled; set it to a container-reachable host to enable.
+      ONBOARD_DATABASE_URL: ""
     depends_on:
       postgres:
         condition: service_healthy

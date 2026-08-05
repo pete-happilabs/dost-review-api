@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from app.auth import verify_guard_key
 from app.batch_runner import sweep_stale_batches
 from app.config import settings
-from app.database import close_pool, create_pool, run_migrations
+from app.database import close_pool, create_onboard_pool, create_pool, run_migrations
 from app.routes import batch, health, reputation, reviews
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -39,6 +39,25 @@ async def lifespan(app: FastAPI):
 
     pool = await create_pool(settings.database_url)
     await run_migrations(pool)
+
+    # Profile validation fails open at query time by design, so it must fail open
+    # at startup too: an unguarded create_onboard_pool() turns an optional read-only
+    # dependency into a hard boot dependency, and every pod restarting during an
+    # Onboard blip crash-loops instead of serving with validation disabled.
+    if settings.onboard_database_url:
+        try:
+            await create_onboard_pool(
+                settings.onboard_database_url,
+                command_timeout=settings.onboard_query_timeout,
+            )
+            logger.info("Onboard DB connected — profile validation enabled")
+        except Exception:
+            logger.exception(
+                "Onboard DB unreachable — profile validation DISABLED; "
+                "reviews will be accepted without profile checks"
+            )
+    else:
+        logger.warning("ONBOARD_DATABASE_URL not set — profile validation disabled")
 
     # H3: Sweep stale RUNNING batches from previous process crashes
     await sweep_stale_batches(pool)

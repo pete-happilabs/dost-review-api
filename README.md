@@ -24,7 +24,7 @@ API available at `http://localhost:8013`.
 
 ## Pipeline
 
-1. **Gate** — Validate at ingestion (self-review, rate limit, dedup)
+1. **Gate** — Validate at ingestion (self-review, profile validation, dedup, rate limit)
 2. **Prepare** — Pull GATED reviews, load stored state, build engine input
 3. **Process** — Call `process_reputation()` from the Reputation Engine
 4. **Commit** — Upsert profile_reputation, mark reviews COMMITTED
@@ -34,8 +34,25 @@ API available at `http://localhost:8013`.
 ```bash
 pip install -e ".[dev]"
 docker compose up -d postgres
-pytest tests/ -v    # 44 tests
+pytest tests/ -v    # 69 tests
 ```
+
+## Profile validation (optional)
+
+If `ONBOARD_DATABASE_URL` is set, the gate checks that both `targetProfileId` and
+`raterProfileId` exist and are `ACTIVE` in Onboard's `profile` table, rejecting
+otherwise with 422. Leave it empty to skip validation entirely.
+
+Notes for deployers:
+
+- Point it at a role with `SELECT` on `profile` only — **not** Onboard's application
+  role, which owns tables holding plaintext PII. The pool also sets
+  `default_transaction_read_only`, so writes are refused by the connection itself.
+- Onboard's `profile.id` is `TEXT` (Prisma maps `String @id` to TEXT), not `uuid`.
+  Ids are compared as text; a `uuid[]` comparison cannot even be planned.
+- The dependency is optional in both directions: an unreachable Onboard DB at
+  startup or at query time logs and disables validation rather than blocking
+  reviews or the service. Lookups are bounded by `ONBOARD_QUERY_TIMEOUT` (2s).
 
 ## Auth
 
@@ -43,5 +60,5 @@ All endpoints except `/health`, `/ready`, `/docs`, `/redoc`, and `/openapi.json`
 
 ## Status
 
-- 44 tests passing (3 rounds of code review complete)
+- 69 tests passing (4 rounds of code review complete)
 - CI via GitHub Actions (Postgres service + pytest on push/PR)

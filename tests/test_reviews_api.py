@@ -294,3 +294,60 @@ async def test_submit_valid_multimedia_accepted(client):
     }
     resp = await client.post("/api/v1/reviews", json=body)
     assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# Profile validation — HTTP contract
+# ---------------------------------------------------------------------------
+
+
+def _body(**overrides):
+    b = {
+        "reviewId": str(uuid4()),
+        "targetProfileId": str(uuid4()),
+        "raterProfileId": str(uuid4()),
+        "reviewText": "Prompt and polite",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    b.update(overrides)
+    return b
+
+
+@pytest.mark.asyncio
+async def test_api_unknown_target_returns_422(client, pool, onboard, seed_profile):
+    body = _body()
+    await seed_profile(body["raterProfileId"])
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 422
+    # detail is a plain string here, unlike the list-of-fields a payload
+    # validation error returns — pinned so callers can rely on the shape.
+    assert resp.json()["detail"] == "Target profile does not exist"
+
+
+@pytest.mark.asyncio
+async def test_api_inactive_target_returns_422(client, pool, onboard, seed_profile):
+    body = _body()
+    await seed_profile(body["targetProfileId"], status="RETIRED")
+    await seed_profile(body["raterProfileId"])
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Target profile is not active"
+
+
+@pytest.mark.asyncio
+async def test_api_unknown_rater_returns_422(client, pool, onboard, seed_profile):
+    body = _body()
+    await seed_profile(body["targetProfileId"])
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Rater profile does not exist"
+
+
+@pytest.mark.asyncio
+async def test_api_valid_profiles_still_accepted(client, pool, onboard, seed_profile):
+    body = _body()
+    await seed_profile(body["targetProfileId"])
+    await seed_profile(body["raterProfileId"])
+    resp = await client.post("/api/v1/reviews", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["status"] == "GATED"

@@ -25,7 +25,12 @@ def _jsonb(value: Any) -> Any:
 
 
 class RiskStore:
-    """Interface; PostgresRiskStore below is the real one, tests substitute a fake."""
+    """Interface; PostgresRiskStore below is the real one, tests substitute a fake.
+
+    `transaction` is deliberately beyond the plan's per-call pool.acquire(): one ingest's
+    reads, engine fold and writes share a transaction serialized per key, so overlapping
+    records for a session or sender cannot discard each other's fold (README, Risk service).
+    """
 
     @contextlib.asynccontextmanager
     async def transaction(self, lock_key: str) -> AsyncIterator[None]:

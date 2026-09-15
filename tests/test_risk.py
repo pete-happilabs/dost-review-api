@@ -1,9 +1,12 @@
 """Risk service: id bridge, record mapping, and ingest -> engine -> tier."""
 import asyncio
+import logging
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app import batch_engine
 from app.config import settings
 from app.main import app
 from app.risk import ids, mapping, service, store
@@ -274,3 +277,21 @@ async def test_engine_rejection_leaves_no_signal_event_row(pool, monkeypatch):
     out = await service.ingest_record(_rec(1, signals=("money_ask",)))
     assert out == {"error": {"message": "events must be a list"}}
     assert await pool.fetchval("SELECT count(*) FROM signal_event WHERE session_id='S1'") == 0
+
+
+# ── which engine runs ────────────────────────────────────────────────────────
+# ENGINE_PATH wins when set (local engine development); otherwise the vendored,
+# reviewed copy — the one the Docker image pins — runs. The resolved file is
+# logged so a deployment can see which copy it is on.
+
+
+def test_vendored_engine_is_the_default_and_carries_the_fraud_family(monkeypatch, caplog):
+    monkeypatch.setattr(batch_engine, "_engine_mod", None)
+    monkeypatch.setattr(batch_engine, "_engine_fn", None)
+    monkeypatch.setattr(settings, "engine_path", "")
+    vendored = Path(batch_engine.__file__).resolve().parent.parent / "vendor" / "engine.py"
+    with caplog.at_level(logging.INFO, logger="app.batch_engine"):
+        mod = batch_engine.load_engine_module()
+    assert Path(mod.__file__).resolve() == vendored
+    assert callable(mod.process_conversation) and callable(mod.process_signals)
+    assert str(vendored) in caplog.text and "vendor" in caplog.text

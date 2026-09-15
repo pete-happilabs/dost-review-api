@@ -33,7 +33,9 @@ def load_engine_module():
         return _engine_mod
 
     engine_path = settings.engine_path
+    source = "ENGINE_PATH"
     if not engine_path:
+        source = "vendor fallback, ENGINE_PATH unset"
         vendor = Path(__file__).parent.parent / "vendor"
         if (vendor / "engine.py").exists():
             engine_path = str(vendor)
@@ -51,6 +53,9 @@ def load_engine_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     _engine_mod = mod
+    # ENGINE_PATH beats vendor/engine.py, so a deployment that sets it runs a different
+    # copy than the vendored one: say which file was loaded, once, where ops can see it.
+    logger.info("Reputation engine loaded from %s (%s)", engine_file.resolve(), source)
     return mod
 
 

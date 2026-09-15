@@ -9,7 +9,11 @@ router = APIRouter(prefix="/api/v1", tags=["risk"])
 
 class Signal(BaseModel):
     """One gate signal as the classifier emits it. Typed so a malformed shape (a null or
-    non-numeric confidence) is a 422 before any row is written, not a 500 after one is."""
+    non-numeric confidence) is a 422 before any row is written, not a 500 after one is.
+
+    Stricter than the plan's `list[dict]` on purpose. The fields are exactly what
+    dost-classifier emits ({name, confidence, tier, detail, entities:[{kind, hash}]}), so
+    nothing is stripped from the record stored in signal_event.record."""
     name: str
     confidence: float = 0.0
     tier: str | None = None

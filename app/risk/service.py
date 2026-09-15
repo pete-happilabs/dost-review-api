@@ -20,7 +20,12 @@ def get_store() -> RiskStore:
 
 class _EngineRejected(Exception):
     """Raised inside a store transaction so an engine input error rolls the whole ingest
-    back: the event must not stay on file as "seen" when it was never folded."""
+    back: the event must not stay on file as "seen" when it was never folded.
+
+    Deliberately beyond the plan text, which returned {"error": ...} after the insert had
+    committed — a retry then answered duplicate:true and the record was never folded. The
+    route contract is unchanged: error -> 422, duplicate -> 200, else 202.
+    """
 
     def __init__(self, error: dict[str, Any]):
         super().__init__(error.get("message"))

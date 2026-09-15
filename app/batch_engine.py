@@ -21,14 +21,16 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # H2: Lazy engine loading — don't break startup if engine is missing
+_engine_mod = None
 _engine_fn = None
 
 
-def _load_engine():
-    """Import process_reputation from the reputation engine."""
-    global _engine_fn
-    if _engine_fn is not None:
-        return _engine_fn
+def load_engine_module():
+    """Load vendor/engine.py (or ENGINE_PATH) once. The fraud family
+    (process_conversation, process_signals) lives beside process_reputation."""
+    global _engine_mod
+    if _engine_mod is not None:
+        return _engine_mod
 
     engine_path = settings.engine_path
     if not engine_path:
@@ -48,7 +50,15 @@ def _load_engine():
         raise ImportError(f"Cannot load engine.py from {engine_file}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    _engine_fn = mod.process_reputation
+    _engine_mod = mod
+    return mod
+
+
+def _load_engine():
+    """Import process_reputation from the reputation engine."""
+    global _engine_fn
+    if _engine_fn is None:
+        _engine_fn = load_engine_module().process_reputation
     return _engine_fn
 
 

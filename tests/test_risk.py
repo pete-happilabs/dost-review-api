@@ -1,4 +1,6 @@
 """Risk service: id bridge, record mapping, and ingest -> engine -> tier."""
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -198,3 +200,77 @@ async def test_ingest_end_to_end_through_postgres(client, pool):
     assert await pool.fetchval("SELECT count(*) FROM signal_event WHERE session_id='S1'") == 2
     state = await store.PostgresRiskStore().get_conversation_state("S1")
     assert "money_ask_no_milestone|hum.a.b.1" in state["fired"]
+
+
+# ── concurrency and atomicity against the real store ─────────────────────────
+# dost-talk forwards records fire-and-forget, so two records for one session
+# (or one sender) are routinely in flight together. Each ingest is a
+# read-modify-write on conversation_risk and profile_risk: without a per-key
+# lock the second writer silently discards the first one's fold.
+
+
+async def test_concurrent_records_for_one_session_do_not_lose_updates(pool):
+    # Record 1 carries the claim and the ask together so identity_then_money fires on it
+    # whichever record wins the lock: the assertions cannot depend on lock order.
+    a = _rec(1, signals=("identity_claim", "money_ask"))
+    b = _rec(2, signals=("money_ask",))
+    outs = await asyncio.gather(service.ingest_record(a), service.ingest_record(b))
+    assert all(o.get("duplicate") is False for o in outs), outs
+    state = await store.PostgresRiskStore().get_conversation_state("S1")
+    assert state["turns"] == 2
+    assert {"money_ask_no_milestone|hum.a.b.1", "identity_then_money|hum.a.b.1"} <= set(state["fired"])
+    assert await pool.fetchval("SELECT count(*) FROM signal_event WHERE session_id='S1'") == 2
+
+
+async def test_concurrent_records_for_one_sender_across_sessions_count_both(pool):
+    a = _rec(1, signals=("money_ask",))
+    b = _rec(2, signals=("money_ask",))
+    b["sessionId"] = "S2"
+    await asyncio.gather(service.ingest_record(a), service.ingest_record(b))
+    prof = await store.PostgresRiskStore().get_profile("hum.a.b.1")
+    assert prof["state"]["fraudTagStates"]["money_ask_no_milestone"]["count"] == 2
+
+
+async def test_null_confidence_is_rejected_before_any_write(client, fake_store):
+    rec = _rec(1)
+    rec["signals"] = [{"name": "money_ask", "confidence": None}]
+    r = await client.post("/api/v1/signals", json=rec)
+    assert r.status_code == 422, r.text
+    assert fake_store.events == [] and fake_store.conv == {} and fake_store.prof == {}
+
+
+async def test_failure_after_insert_rolls_the_signal_event_back(pool, monkeypatch):
+    real = store.PostgresRiskStore.put_conversation_state
+    calls = []
+
+    async def flaky(self, sid, state):
+        calls.append(sid)
+        if len(calls) == 1:
+            raise RuntimeError("db went away")
+        await real(self, sid, state)
+
+    monkeypatch.setattr(store.PostgresRiskStore, "put_conversation_state", flaky)
+    rec = _rec(1, signals=("money_ask",))
+    with pytest.raises(RuntimeError):
+        await service.ingest_record(rec)
+    # The half-processed record must not be on file, or the retry answers "duplicate"
+    # and the fold never happens.
+    assert await pool.fetchval("SELECT count(*) FROM signal_event WHERE session_id='S1'") == 0
+    out = await service.ingest_record(rec)
+    assert out["duplicate"] is False and out["riskTier"] in ("none", "elevated")
+    assert await pool.fetchval("SELECT count(*) FROM signal_event WHERE session_id='S1'") == 1
+    assert "money_ask_no_milestone|hum.a.b.1" in \
+        (await store.PostgresRiskStore().get_conversation_state("S1"))["fired"]
+
+
+async def test_engine_rejection_leaves_no_signal_event_row(pool, monkeypatch):
+    class Stub:
+        @staticmethod
+        def process_conversation(data):
+            return {"conversationId": data["conversationId"],
+                    "error": {"message": "events must be a list"}}, {"models": []}
+
+    monkeypatch.setattr(service, "load_engine_module", lambda: Stub)
+    out = await service.ingest_record(_rec(1, signals=("money_ask",)))
+    assert out == {"error": {"message": "events must be a list"}}
+    assert await pool.fetchval("SELECT count(*) FROM signal_event WHERE session_id='S1'") == 0

@@ -7,6 +7,16 @@ from app.risk import service
 router = APIRouter(prefix="/api/v1", tags=["risk"])
 
 
+class Signal(BaseModel):
+    """One gate signal as the classifier emits it. Typed so a malformed shape (a null or
+    non-numeric confidence) is a 422 before any row is written, not a 500 after one is."""
+    name: str
+    confidence: float = 0.0
+    tier: str | None = None
+    detail: str = ""
+    entities: list[dict] = Field(default_factory=list)
+
+
 class SignalRecord(BaseModel):
     modelVersion: str
     ts: str
@@ -20,7 +30,7 @@ class SignalRecord(BaseModel):
     context: dict = Field(default_factory=dict)
     textHash: str | None = None
     textLength: int = 0
-    signals: list[dict] = Field(default_factory=list)
+    signals: list[Signal] = Field(default_factory=list)
 
 
 @router.post("/signals", status_code=202)

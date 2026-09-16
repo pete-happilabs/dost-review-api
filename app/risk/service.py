@@ -70,8 +70,15 @@ async def ingest_record(record: dict[str, Any]) -> dict[str, Any]:
 
             participants = await store.participants_of(
                 session_id, {p for p in (sender, receiver) if p})
+            # profile_id=sender: _fold writes into the SENDER's account state, so only the
+            # sender's tags may go into it. One record is mapped per call today, but the
+            # filter is what makes that a contract rather than a coincidence.
             signals = mapping.derived_to_signals(conv_out["derivedTags"], session_id=session_id,
-                                                 participants=participants)
+                                                 participants=participants, profile_id=sender)
+            if not signals:
+                # Every derived tag belonged to someone else: nothing to fold here, and an
+                # empty fold would still write an all-zero profile row for the sender.
+                return {"duplicate": False, "derived": [], "riskTier": await _tier_of(sender)}
             return await _fold(sender, signals=signals, outcomes=[], session_id=session_id)
     except _EngineRejected as rejected:
         return {"error": rejected.error}

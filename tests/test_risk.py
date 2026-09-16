@@ -51,12 +51,27 @@ def test_categorical_reject_becomes_a_milestone_free_tag():
 def test_low_confidence_signals_are_dropped_before_the_engine():
     # The engine reads only signal NAMES (vendor/engine.py: names = [s.get("name") ...]),
     # so a 0.05-confidence money_ask would otherwise weigh exactly as much as a 0.95 one.
+    # But a name the engine keeps STATE for only has to clear the noise floor — dropping it
+    # also drops the seed a much later, high-confidence tag reads (see the chain test below).
     rec = _record()
-    rec["signals"] = [{"name": "money_ask", "confidence": 0.2},
-                      {"name": "identity_claim", "confidence": 0.5},
-                      {"name": "contact_share", "confidence": 0.95}]
+    rec["signals"] = [{"name": "urgency", "confidence": 0.2},         # not a seed, < 0.5
+                      {"name": "investment_pitch", "confidence": 0.5},
+                      {"name": "money_ask", "confidence": 0.4},       # seed, >= noise floor
+                      {"name": "identity_claim", "confidence": 0.05}]  # seed, but noise
     ev = mapping.to_conversation_event(rec)
-    assert [s["name"] for s in ev["signals"]] == ["identity_claim", "contact_share"]
+    assert [s["name"] for s in ev["signals"]] == ["investment_pitch", "money_ask"]
+
+
+def test_state_seeding_signals_survive_the_confidence_floor():
+    # engine._CONV_SIGNAL_STAGES: every one of these seeds conversation state that a later
+    # message reads. A soft opening ask is exactly what a model scores low.
+    rec = _record()
+    rec["signals"] = [{"name": n, "confidence": 0.3} for n in
+                      ("channel_shift_request", "identity_claim", "money_ask",
+                       "payee_asked_to_act", "payment_claim", "contact_share",
+                       "refusal_to_meet")]
+    ev = mapping.to_conversation_event(rec)
+    assert len(ev["signals"]) == 7
 
 
 def test_low_confidence_is_dropped_but_a_categorical_reject_still_fires():
@@ -68,10 +83,25 @@ def test_low_confidence_is_dropped_but_a_categorical_reject_still_fires():
 
 def test_deal_stage_becomes_an_engine_milestone():
     assert mapping.to_conversation_event(_record())["milestones"] == []   # dealStage "none"
-    for stage in ("price_agreed", "meet_scheduled", "ledger_credit", "handover_confirmed"):
+    # The ladder is ordinal (plan line 106): any rung past price_agreed means the price WAS
+    # agreed, so the implied rung is emitted too — otherwise engine.stage_ts("price_agreed")
+    # stays None and contact_share_pre_milestone fires on a normal post-price number swap.
+    expected = {
+        "price_agreed": ["price_agreed"],
+        "meet_scheduled": ["price_agreed", "meet_scheduled"],
+        "ledger_credit": ["price_agreed", "ledger_credit"],
+        "handover_confirmed": ["price_agreed", "handover_confirmed"],
+        # never synthesised from a later rung: fee_escalation / jumped_deposit read the
+        # RECORDED ts of these two, so inventing one would invent a credit time.
+        "ledger_credit_small": ["ledger_credit_small"],
+    }
+    for stage, milestones in expected.items():
         rec = _record()
         rec["context"]["dealStage"] = stage
-        assert mapping.to_conversation_event(rec)["milestones"] == [stage]
+        got = mapping.to_conversation_event(rec)["milestones"]
+        assert got == milestones, stage
+        # price_agreed is the ONLY rung ever synthesised.
+        assert set(got) - {stage} <= {"price_agreed"}, stage
     rec = _record()
     rec["context"]["dealStage"] = "not_a_stage"
     assert mapping.to_conversation_event(rec)["milestones"] == []
@@ -84,6 +114,25 @@ def test_derived_tags_to_signals_attribute_counterparty():
                                       participants={"hum.a.b.1", "hum.c.d.2"})
     assert sigs == [{"tag": "money_ask_no_milestone", "conversationId": "S1",
                      "counterpartyId": "hum.c.d.2", "createdAt": "2026-09-01T10:00:00Z"}]
+
+
+def test_derived_tags_can_be_filtered_to_one_profile():
+    # The caller folds the returned list into ONE profile. That is safe only while every
+    # tag belongs to that profile, which is true today because one record is mapped per
+    # call — profile_id makes it enforced instead of implied.
+    derived = [{"tag": "money_ask_no_milestone", "profileId": "hum.a.b.1", "ts": "2026-09-01T10:00:00Z"},
+               {"tag": "contact_share_pre_milestone", "profileId": "hum.c.d.2", "ts": "2026-09-01T10:01:00Z"}]
+    parts = {"hum.a.b.1", "hum.c.d.2"}
+    mine = mapping.derived_to_signals(derived, session_id="S1", participants=parts,
+                                      profile_id="hum.a.b.1")
+    assert mine == [{"tag": "money_ask_no_milestone", "conversationId": "S1",
+                     "counterpartyId": "hum.c.d.2", "createdAt": "2026-09-01T10:00:00Z"}]
+    theirs = mapping.derived_to_signals(derived, session_id="S1", participants=parts,
+                                        profile_id="hum.c.d.2")
+    assert [s["tag"] for s in theirs] == ["contact_share_pre_milestone"]
+    assert theirs[0]["counterpartyId"] == "hum.a.b.1"
+    # profile_id omitted keeps the old, unfiltered behaviour.
+    assert len(mapping.derived_to_signals(derived, session_id="S1", participants=parts)) == 2
 
 
 # ── ingest -> engine -> tier, against a fake store ───────────────────────────
@@ -127,6 +176,10 @@ def _rec(i, sender="hum.a.b.1", receiver="hum.c.d.2", signals=(), verdict="accep
                         for s in signals]}
 
 
+def _tags(fake_store, profile="hum.a.b.1"):
+    return set(fake_store.prof.get(profile, {}).get("state", {}).get("fraudTagStates", {}))
+
+
 async def test_money_ask_before_milestone_raises_sender_tier(client, fake_store):
     for i, sigs in enumerate([("identity_claim",), (), ("money_ask",)], start=1):
         r = await client.post("/api/v1/signals", json=_rec(i, signals=sigs))
@@ -148,12 +201,82 @@ async def test_money_ask_after_a_milestone_fires_nothing(client, fake_store):
     assert "hum.a.b.1" not in fake_store.prof          # no tag fired, so no profile fold
 
 
-async def test_low_confidence_money_ask_fires_nothing(client, fake_store):
+async def test_contact_share_after_a_milestone_fires_nothing(client, fake_store):
+    # Decision D4 (plan line 49) and the gate's own prompt: sharing a number once the price
+    # is agreed is normal in India. dealStage is an ordinal ladder, so "meet_scheduled"
+    # already implies price_agreed — contact_share_pre_milestone must not fire.
+    rec = _rec(1, signals=("contact_share",))
+    rec["context"]["dealStage"] = "meet_scheduled"
+    r = await client.post("/api/v1/signals", json=rec)
+    assert r.status_code == 202, r.text
+    assert fake_store.conv["S1"]["stages"].get("price_agreed")
+    assert "hum.a.b.1" not in fake_store.prof
+
+
+async def test_noise_confidence_money_ask_fires_nothing(client, fake_store):
     rec = _rec(1, signals=("money_ask",))
-    rec["signals"][0]["confidence"] = 0.2
+    rec["signals"][0]["confidence"] = 0.1
     r = await client.post("/api/v1/signals", json=rec)
     assert r.status_code == 202, r.text
     assert "hum.a.b.1" not in fake_store.prof
+
+
+async def test_a_soft_opening_ask_still_seeds_fee_escalation(client, fake_store):
+    # The advance-fee sequence fee_escalation (weight 6.0) exists to catch: soft opening
+    # ask -> deposit -> bigger ask. The opening ask is the one a model scores low, and the
+    # engine seeds askers[sender] from it — so dropping it disables the later detection.
+    soft = _rec(1, signals=("money_ask",))
+    soft["signals"][0]["confidence"] = 0.4
+    credited = _rec(2)
+    credited["context"]["dealStage"] = "ledger_credit"
+    hard = _rec(3, signals=("money_ask",))
+    hard["signals"][0]["confidence"] = 0.95
+    for rec in (soft, credited, hard):
+        r = await client.post("/api/v1/signals", json=rec)
+        assert r.status_code == 202, r.text
+    assert "fee_escalation" in _tags(fake_store)
+
+
+async def test_a_low_confidence_identity_claim_still_seeds_identity_then_money(client, fake_store):
+    claim = _rec(1, signals=("identity_claim",))
+    claim["signals"][0]["confidence"] = 0.4
+    for rec in (claim, _rec(2, signals=("money_ask",))):
+        r = await client.post("/api/v1/signals", json=rec)
+        assert r.status_code == 202, r.text
+    assert "identity_then_money" in _tags(fake_store)
+
+
+async def test_two_senders_in_one_session_do_not_cross_attribute(client, fake_store):
+    for i, sender, receiver in ((1, "hum.a.b.1", "hum.c.d.2"), (2, "hum.c.d.2", "hum.a.b.1")):
+        r = await client.post("/api/v1/signals",
+                              json=_rec(i, sender=sender, receiver=receiver, signals=("money_ask",)))
+        assert r.status_code == 202, r.text
+    for pid in ("hum.a.b.1", "hum.c.d.2"):
+        st = fake_store.prof[pid]["state"]["fraudTagStates"]["money_ask_no_milestone"]
+        assert st["count"] == 1, pid
+
+
+async def test_ingest_folds_only_the_senders_own_tags(client, fake_store, monkeypatch):
+    """A caller that ever maps more than one event per call (a replay, the Task 10 queue
+    path) must not fold the counterparty's fraud tags into the sender's profile."""
+    real = service.load_engine_module()
+
+    class Stub:
+        process_signals = staticmethod(real.process_signals)
+
+        @staticmethod
+        def process_conversation(data):
+            out, metrics = real.process_conversation(data)
+            out["derivedTags"].append({"tag": "contact_share_pre_milestone",
+                                       "profileId": "hum.c.d.2",
+                                       "ts": data["events"][0]["ts"]})
+            return out, metrics
+
+    monkeypatch.setattr(service, "load_engine_module", lambda: Stub)
+    r = await client.post("/api/v1/signals", json=_rec(1, signals=("money_ask",)))
+    assert r.status_code == 202, r.text
+    assert _tags(fake_store) == {"money_ask_no_milestone"}
+    assert "hum.c.d.2" not in fake_store.prof
 
 
 async def test_duplicate_event_is_idempotent(client, fake_store):

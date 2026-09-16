@@ -48,6 +48,36 @@ def test_categorical_reject_becomes_a_milestone_free_tag():
         any(s["name"] == "categorical_block" for s in ev["signals"])
 
 
+def test_low_confidence_signals_are_dropped_before_the_engine():
+    # The engine reads only signal NAMES (vendor/engine.py: names = [s.get("name") ...]),
+    # so a 0.05-confidence money_ask would otherwise weigh exactly as much as a 0.95 one.
+    rec = _record()
+    rec["signals"] = [{"name": "money_ask", "confidence": 0.2},
+                      {"name": "identity_claim", "confidence": 0.5},
+                      {"name": "contact_share", "confidence": 0.95}]
+    ev = mapping.to_conversation_event(rec)
+    assert [s["name"] for s in ev["signals"]] == ["identity_claim", "contact_share"]
+
+
+def test_low_confidence_is_dropped_but_a_categorical_reject_still_fires():
+    rec = _record(verdict="reject", category="otp_request")
+    rec["signals"] = [{"name": "money_ask", "confidence": 0.1}]
+    ev = mapping.to_conversation_event(rec)
+    assert [s["name"] for s in ev["signals"]] == ["categorical_block"]
+
+
+def test_deal_stage_becomes_an_engine_milestone():
+    assert mapping.to_conversation_event(_record())["milestones"] == []   # dealStage "none"
+    for stage in ("price_agreed", "meet_scheduled", "ledger_credit", "handover_confirmed"):
+        rec = _record()
+        rec["context"]["dealStage"] = stage
+        assert mapping.to_conversation_event(rec)["milestones"] == [stage]
+    rec = _record()
+    rec["context"]["dealStage"] = "not_a_stage"
+    assert mapping.to_conversation_event(rec)["milestones"] == []
+    assert mapping.to_conversation_event(_record(context={}))["milestones"] == []
+
+
 def test_derived_tags_to_signals_attribute_counterparty():
     derived = [{"tag": "money_ask_no_milestone", "profileId": "hum.a.b.1", "ts": "2026-09-01T10:00:00Z"}]
     sigs = mapping.derived_to_signals(derived, session_id="S1",
@@ -105,6 +135,25 @@ async def test_money_ask_before_milestone_raises_sender_tier(client, fake_store)
     assert "money_ask_no_milestone" in prof["state"]["fraudTagStates"]
     assert "identity_then_money" in prof["state"]["fraudTagStates"]
     assert prof["risk_tier"] in ("none", "elevated")          # one conversation: not yet high
+
+
+async def test_money_ask_after_a_milestone_fires_nothing(client, fake_store):
+    # dost-talk hard-codes dealStage "none" today; the moment a milestone source lands this
+    # is the path that stops money_ask_no_milestone firing on every legitimate seller.
+    rec = _rec(1, signals=("money_ask",))
+    rec["context"]["dealStage"] = "meet_scheduled"
+    r = await client.post("/api/v1/signals", json=rec)
+    assert r.status_code == 202, r.text
+    assert fake_store.conv["S1"]["stages"].get("meet_scheduled")
+    assert "hum.a.b.1" not in fake_store.prof          # no tag fired, so no profile fold
+
+
+async def test_low_confidence_money_ask_fires_nothing(client, fake_store):
+    rec = _rec(1, signals=("money_ask",))
+    rec["signals"][0]["confidence"] = 0.2
+    r = await client.post("/api/v1/signals", json=rec)
+    assert r.status_code == 202, r.text
+    assert "hum.a.b.1" not in fake_store.prof
 
 
 async def test_duplicate_event_is_idempotent(client, fake_store):

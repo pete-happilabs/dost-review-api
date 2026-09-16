@@ -107,13 +107,19 @@ async def _fold(profile_id: str, *, signals, outcomes, session_id, reason=None, 
     store = get_store()
     async with store.transaction(f"profile:{profile_id}"):
         prev = await store.get_profile(profile_id) or {}
-        out, _ = engine.process_signals({
+        payload = {
             "profileId": profile_id, "state": prev.get("state"),
-            # 0 until Onboard's tenure read exists: the engine then discounts velocity
-            # evidence for young accounts, which is the conservative default.
-            "tenureDays": prev.get("tenure_days", 0),
             "signals": signals, "outcomes": outcomes,
-        })
+        }
+        # Tenure is unknown until Onboard's read exists, and unknown is NOT zero. The engine
+        # reads an absent/None tenureDays as "unknown" and applies NO young-account discount
+        # (it falls back to RISK_TENURE_PRIOR_DAYS); an explicit 0 means a 0-day-old account
+        # and DOES discount, roughly halving every velocity-derived score and so doubling the
+        # QUEUE_AT threshold in practice. Pass the key only when a real value exists.
+        tenure_days = prev.get("tenure_days")
+        if tenure_days is not None:
+            payload["tenureDays"] = tenure_days
+        out, _ = engine.process_signals(payload)
         if "error" in out:
             raise _EngineRejected(out["error"])
         await store.put_profile(profile_id, account_id=prev.get("account_id"),

@@ -510,3 +510,106 @@ def test_vendored_engine_is_the_default_and_carries_the_fraud_family(monkeypatch
     assert Path(mod.__file__).resolve() == vendored
     assert callable(mod.process_conversation) and callable(mod.process_signals)
     assert str(vendored) in caplog.text and "vendor" in caplog.text
+
+
+# ── the record is stored verbatim ────────────────────────────────────────────
+# signal_event.record is what a human reviewer reads back, and 004_risk.sql calls it
+# "the Plan 1 record, verbatim". Both models therefore allow extra fields: with pydantic's
+# default extra="ignore" a field a DES bump adds was dropped by record.model_dump() before
+# store.insert_signal_event ever saw it — silently, on the forensic copy.
+
+
+async def test_undeclared_fields_survive_into_the_stored_record(client, fake_store):
+    rec = _rec(1, signals=("money_ask",))
+    rec["listingId"] = "L-42"                            # undeclared, top level
+    rec["locale"] = "hi-IN"
+    rec["signals"][0]["newFieldFromDesBump"] = "kept"    # undeclared, inside a signal
+    r = await client.post("/api/v1/signals", json=rec)
+    assert r.status_code == 202, r.text
+    stored = fake_store.events[0]
+    assert stored["listingId"] == "L-42" and stored["locale"] == "hi-IN"
+    assert stored["signals"][0]["newFieldFromDesBump"] == "kept"
+    # ...and the declared fields keep their types: extra="allow" must not soften the 422 a
+    # missing confidence gets, which is the check that makes a DES bump loud.
+    bad = _rec(2)
+    bad["signals"] = [{"name": "money_ask", "newFieldFromDesBump": "kept"}]
+    r = await client.post("/api/v1/signals", json=bad)
+    assert r.status_code == 422, r.text
+    assert len(fake_store.events) == 1
+
+
+async def test_undeclared_fields_survive_into_postgres(client, pool):
+    rec = _rec(1, signals=("money_ask",))
+    rec["listingId"] = "L-42"
+    rec["signals"][0]["newFieldFromDesBump"] = "kept"
+    assert (await client.post("/api/v1/signals", json=rec)).status_code == 202
+    row = await pool.fetchval("SELECT record FROM signal_event WHERE session_id='S1'")
+    stored = store._jsonb(row)
+    assert stored["listingId"] == "L-42"
+    assert stored["signals"][0]["newFieldFromDesBump"] == "kept"
+
+
+# ── unknown tenure is not zero tenure ────────────────────────────────────────
+
+
+async def test_unknown_tenure_is_not_sent_to_the_engine_as_zero(client, fake_store, monkeypatch):
+    """No tenure source exists yet (store.get_profile has no tenure_days column and
+    004_risk.sql has none), and vendor/engine.py distinguishes the two: an absent/None
+    tenureDays is "unknown" and takes RISK_TENURE_PRIOR_DAYS, so no young-account discount,
+    while an explicit 0 is a 0-day-old account and halves the non-outcome mass. Passing 0
+    roughly halved every velocity-derived score, doubling QUEUE_AT in practice."""
+    real = service.load_engine_module()
+    seen = {}
+
+    class Spy:
+        process_conversation = staticmethod(real.process_conversation)
+
+        @staticmethod
+        def process_signals(data):
+            seen["payload"] = dict(data)
+            return real.process_signals(data)
+
+    monkeypatch.setattr(service, "load_engine_module", lambda: Spy)
+    r = await client.post("/api/v1/signals", json=_rec(1, signals=("money_ask",)))
+    assert r.status_code == 202, r.text
+
+    payload = seen["payload"]
+    assert payload.get("tenureDays") is None, payload      # absent, or None — never 0
+    assert payload["signals"] == [{"tag": "money_ask_no_milestone", "conversationId": "S1",
+                                   "counterpartyId": "hum.c.d.2",
+                                   "createdAt": "2026-09-01T10:01:00.000Z"}]
+
+    # Pinned against the vendored engine, with `now` fixed so the pin does not drift with
+    # the clock: one money_ask_no_milestone is worth 22.1 at unknown tenure and 11.7 at 0.
+    pinned = {**payload, "now": "2026-09-01T10:05:00Z"}
+    unknown, _ = real.process_signals(dict(pinned))
+    zeroed, _ = real.process_signals({**pinned, "tenureDays": 0})
+    assert (unknown["riskScore"], zeroed["riskScore"]) == (22.1, 11.7)
+    # The score actually stored is the undiscounted one. Re-run on the live clock, since
+    # the stored value carries the real decay from createdAt to now.
+    live_unknown, _ = real.process_signals(dict(payload))
+    live_zeroed, _ = real.process_signals({**payload, "tenureDays": 0})
+    assert live_zeroed["riskScore"] < live_unknown["riskScore"]
+    assert float(fake_store.prof["hum.a.b.1"]["risk_score"]) == pytest.approx(
+        live_unknown["riskScore"], abs=0.2)
+
+
+# ── one OPEN review per profile ──────────────────────────────────────────────
+# _fold enqueues on every ingest once riskScore >= QUEUE_AT, so a persistently high-risk
+# account used to add an OPEN review_queue row per message. 005 adds the partial unique
+# index and store.enqueue_review takes ON CONFLICT DO NOTHING (the index alone would turn
+# the second enqueue into a UniqueViolation that rolls the whole ingest back).
+
+
+async def test_repeated_high_scores_leave_exactly_one_open_review(client, pool):
+    for i in range(2):
+        r = await client.post("/api/v1/outcomes", json={
+            "profileId": "hum.q.1", "reporterId": f"hum.r.{i}", "sessionId": f"S{i}",
+            "tag": "paid_not_delivered", "evidence": {"amount": 5000}})
+        assert r.status_code == 202, r.text
+        assert r.json()["riskScore"] >= service.QUEUE_AT, r.text
+    assert await pool.fetchval("SELECT count(*) FROM review_queue "
+                               "WHERE profile_id='hum.q.1' AND status='OPEN'") == 1
+    # The evidence of both reports is still on file; only the queue row is deduped.
+    assert await pool.fetchval("SELECT count(*) FROM outcome_event "
+                               "WHERE profile_id='hum.q.1'") == 2

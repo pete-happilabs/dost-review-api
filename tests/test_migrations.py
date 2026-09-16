@@ -43,3 +43,26 @@ async def test_signal_event_dedupes_on_session_and_event(pool):
             await pool.execute(insert)
     finally:
         await pool.execute("DELETE FROM signal_event WHERE session_id = 's1'")
+
+
+@pytest.mark.asyncio
+async def test_005_allows_only_one_open_review_per_profile(pool):
+    # service._fold enqueues on every ingest above QUEUE_AT, so the queue is the one place
+    # a high-risk account piles up. The partial unique index is the durable guard;
+    # store.enqueue_review's ON CONFLICT DO NOTHING is what keeps it from raising.
+    insert = (
+        "INSERT INTO review_queue (profile_id, session_id, reason, risk_score, status) "
+        "VALUES ('hum.mig.1', $1, 'score', 72.0, $2)"
+    )
+    try:
+        await pool.execute(insert, "S1", "OPEN")
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await pool.execute(insert, "S2", "OPEN")
+        # The index is partial: a decided row does not block a fresh OPEN one, and any
+        # number of non-OPEN rows may coexist.
+        await pool.execute(insert, "S3", "EXPIRED")
+        await pool.execute(insert, "S4", "EXPIRED")
+        assert await pool.fetchval(
+            "SELECT count(*) FROM review_queue WHERE profile_id='hum.mig.1'") == 3
+    finally:
+        await pool.execute("DELETE FROM review_queue WHERE profile_id = 'hum.mig.1'")

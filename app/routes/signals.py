@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.risk import service
 
@@ -14,6 +14,14 @@ class Signal(BaseModel):
     Stricter than the plan's `list[dict]` on purpose. The fields are exactly what
     dost-classifier emits ({name, confidence, tier, detail, entities:[{kind, hash}]}), so
     nothing is stripped from the record stored in signal_event.record."""
+
+    # extra="allow", not pydantic's default extra="ignore": model_dump() is what reaches
+    # store.insert_signal_event, and signal_event.record is the forensic evidence a human
+    # reviewer reads. With "ignore", a field a DES bump adds to a signal is silently dropped
+    # on the way to the column that 004_risk.sql calls "the Plan 1 record, verbatim".
+    # Declared fields keep their types, so a missing/null/non-numeric confidence is still 422.
+    model_config = ConfigDict(extra="allow")
+
     name: str
     # No default on purpose. A default composes with the mapper's confidence floor into a
     # silent no-op: an absent field becomes 0.0, every signal is dropped below the floor,
@@ -27,6 +35,12 @@ class Signal(BaseModel):
 
 
 class SignalRecord(BaseModel):
+    """The gate record as Plan 1 defines it. Undeclared top-level fields are kept for the
+    same reason Signal keeps them: the whole record is stored verbatim in
+    signal_event.record, so a field this service does not read yet must still survive."""
+
+    model_config = ConfigDict(extra="allow")
+
     modelVersion: str
     ts: str
     eventId: str

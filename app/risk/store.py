@@ -127,9 +127,13 @@ class PostgresRiskStore(RiskStore):
             json.dumps(row.get("evidence") or {}))
 
     async def enqueue_review(self, **row):
+        # ON CONFLICT DO NOTHING against uq_review_queue_open (005): _fold enqueues on every
+        # ingest above QUEUE_AT, so without this a persistently high-risk account would raise
+        # UniqueViolation on its second message and roll the whole ingest back. The profile's
+        # live score is on profile_risk; the OPEN row is only the "a human should look" flag.
         await self._db().execute(
             "INSERT INTO review_queue (profile_id, session_id, reason, risk_score, evidence) "
-            "VALUES ($1,$2,$3,$4,$5::jsonb)",
+            "VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT DO NOTHING",
             row["profile_id"], row.get("session_id"), row["reason"], row["risk_score"],
             json.dumps(row.get("evidence") or {}))
 

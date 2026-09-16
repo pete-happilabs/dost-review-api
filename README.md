@@ -34,7 +34,7 @@ API available at `http://localhost:8013`.
 ```bash
 pip install -e ".[dev]"
 docker compose up -d postgres
-pytest tests/ -v    # 91 tests
+pytest tests/ -v    # 110 tests
 ```
 
 ## Profile validation (optional)
@@ -58,7 +58,8 @@ Notes for deployers:
 
 The same app also ingests the intent gate's signal records, folds them through the
 Reputation Engine's fraud family (`process_conversation`, `process_signals`) and serves a
-per-profile risk tier. Tables come from `migrations/004_risk.sql`; code lives in `app/risk/`
+per-profile risk tier. Tables come from `migrations/004_risk.sql` (plus `005_*` for the
+one-OPEN-review-per-profile index); code lives in `app/risk/`
 (`ids.py`, `mapping.py`, `store.py`, `service.py`) and `app/routes/{signals,risk,outcomes}.py`.
 
 | Method | Path | Description |
@@ -84,7 +85,10 @@ Behaviour that goes beyond the plan text (Plan 3, Task 6) and is kept on purpose
 - **Typed signal payload.** `signals[]` is validated as
   `{name, confidence: float, tier, detail, entities}` — exactly the shape the gate emits — so
   a missing, null or non-numeric `confidence` is a 422 before any row is written. Nothing is
-  stripped from the record stored in `signal_event.record`. `confidence` has no default on
+  stripped from the record stored in `signal_event.record`: both models set
+  `extra="allow"`, so a field a DES bump adds — at the top level or inside a signal — is
+  stored verbatim even though this service does not read it yet, while the declared fields
+  keep their types. `confidence` has no default on
   purpose: a default would compose with the mapper's confidence floor into a silent no-op
   (202, no tag, a fabricated `0.0` on the stored record), so a DES bump that renamed or
   dropped the field would turn the fraud path off with a green health check. The names the
@@ -114,5 +118,5 @@ empty, so a copied example file runs unauthenticated until you fill it in.
 
 ## Status
 
-- 91 tests passing (4 rounds of code review complete; risk service reviewed once more)
+- 110 tests passing (4 rounds of code review complete; risk service reviewed once more)
 - CI via GitHub Actions (Postgres service + pytest on push/PR)

@@ -15,7 +15,12 @@ class Signal(BaseModel):
     dost-classifier emits ({name, confidence, tier, detail, entities:[{kind, hash}]}), so
     nothing is stripped from the record stored in signal_event.record."""
     name: str
-    confidence: float = 0.0
+    # No default on purpose. A default composes with the mapper's confidence floor into a
+    # silent no-op: an absent field becomes 0.0, every signal is dropped below the floor,
+    # and the request still answers 202 with a pydantic-fabricated 0.0 on the stored
+    # record — so a DES bump that renames or drops this field would turn the fraud path
+    # off with a green health check. Required, so it is a 422 before any row is written.
+    confidence: float
     tier: str | None = None
     detail: str = ""
     entities: list[dict] = Field(default_factory=list)

@@ -1,7 +1,10 @@
 """Shape adapters between the gate's signal record and the engine's inputs."""
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Gate categories that are blocked on one message and therefore count as an
 # account-level velocity tag on their own (engine.FRAUD_VELOCITY_TAGS).
@@ -48,10 +51,18 @@ def _keeps(name: str, confidence: float) -> bool:
 
 
 def to_conversation_event(record: dict[str, Any]) -> dict[str, Any]:
+    named = [s for s in record.get("signals", []) if isinstance(s, dict) and "name" in s]
     signals = [{"name": s["name"], "confidence": float(s.get("confidence", 0.0))}
-               for s in record.get("signals", [])
-               if isinstance(s, dict) and "name" in s
-               and _keeps(s["name"], float(s.get("confidence", 0.0)))]
+               for s in named if _keeps(s["name"], float(s.get("confidence", 0.0)))]
+    # The floor is the only place a named signal disappears from the risk path, so the
+    # names it drops have to be recoverable from production logs: without this, "why did
+    # this scam not fire?" is unanswerable, and a gate-side contract break (a renamed or
+    # dropped confidence field in a DES bump) looks identical to a quiet conversation.
+    dropped = [s["name"] for s in named
+               if not _keeps(s["name"], float(s.get("confidence", 0.0)))]
+    if dropped:
+        logger.info("risk mapping %s: dropped low-confidence signals %s",
+                    record.get("eventId"), dropped)
     if record.get("verdict") == "reject" and record.get("category") in _CATEGORICAL:
         signals.append({"name": "categorical_block", "confidence": 1.0})
     ctx = record.get("context") or {}

@@ -74,6 +74,41 @@ def test_state_seeding_signals_survive_the_confidence_floor():
     assert len(ev["signals"]) == 7
 
 
+def test_mapping_constants_track_the_vendored_engine():
+    # _STATE_SEEDING and _MILESTONE_STAGES are hand-copies of engine._CONV_SIGNAL_STAGES /
+    # engine._CONV_MILESTONES, kept local on purpose (importing the engine into a pure
+    # mapper would couple them). This test is the seam: a vendor/engine.py refresh — Task 6
+    # copies it byte for byte from an engine still under development — that adds a stage
+    # name must be mirrored here, or that signal is silently held to the 0.5 floor and the
+    # state it seeds is lost, and a new milestone name is silently ignored so
+    # contact_share_pre_milestone / money_ask_no_milestone fire on legitimate deals.
+    eng = service.load_engine_module()
+    assert mapping._STATE_SEEDING == set(eng._CONV_SIGNAL_STAGES)
+    assert mapping._MILESTONE_STAGES == set(eng._CONV_MILESTONES)
+    assert set(mapping._MILESTONE_LADDER) <= mapping._MILESTONE_STAGES
+
+
+def test_dropped_low_confidence_signals_are_logged(caplog):
+    # A floor that silently drops names turns a gate-side contract break (a renamed or
+    # dropped field in a DES bump) into a fraud path that stops working with a green health
+    # check. The names it drops have to be answerable from production logs.
+    rec = _record()
+    rec["signals"] = [{"name": "urgency", "confidence": 0.2},          # not a seed, < 0.5
+                      {"name": "identity_claim", "confidence": 0.05},  # seed, below noise
+                      {"name": "investment_pitch", "confidence": 0.9}]  # kept
+    with caplog.at_level(logging.INFO, logger="app.risk.mapping"):
+        ev = mapping.to_conversation_event(rec)
+    assert [s["name"] for s in ev["signals"]] == ["investment_pitch"]
+    assert "urgency" in caplog.text and "identity_claim" in caplog.text
+    assert "investment_pitch" not in caplog.text
+    assert rec["eventId"] in caplog.text
+    # Nothing dropped -> nothing logged.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="app.risk.mapping"):
+        mapping.to_conversation_event(_record())
+    assert caplog.text == ""
+
+
 def test_low_confidence_is_dropped_but_a_categorical_reject_still_fires():
     rec = _record(verdict="reject", category="otp_request")
     rec["signals"] = [{"name": "money_ask", "confidence": 0.1}]
@@ -407,11 +442,19 @@ async def test_concurrent_records_for_one_sender_across_sessions_count_both(pool
 
 
 async def test_null_confidence_is_rejected_before_any_write(client, fake_store):
-    rec = _rec(1)
-    rec["signals"] = [{"name": "money_ask", "confidence": None}]
-    r = await client.post("/api/v1/signals", json=rec)
-    assert r.status_code == 422, r.text
-    assert fake_store.events == [] and fake_store.conv == {} and fake_store.prof == {}
+    # A missing confidence is the same contract break as a null one — and the more likely
+    # one, since a DES bump that renames or drops the field produces exactly this shape.
+    # With a default it used to compose with the mapper's floor into a silent no-op: 202,
+    # no tag, nothing logged, and a pydantic-fabricated 0.0 on the stored record so even a
+    # forensic reader could not tell the field was absent.
+    for bad in ({"name": "money_ask", "confidence": None},
+                {"name": "money_ask"},
+                {"name": "money_ask", "confidence": "high"}):
+        rec = _rec(1)
+        rec["signals"] = [bad]
+        r = await client.post("/api/v1/signals", json=rec)
+        assert r.status_code == 422, (bad, r.text)
+        assert fake_store.events == [] and fake_store.conv == {} and fake_store.prof == {}
 
 
 async def test_failure_after_insert_rolls_the_signal_event_back(pool, monkeypatch):

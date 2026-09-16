@@ -83,8 +83,12 @@ Behaviour that goes beyond the plan text (Plan 3, Task 6) and is kept on purpose
   The route contract is unchanged: error -> 422, duplicate -> 200, otherwise 202.
 - **Typed signal payload.** `signals[]` is validated as
   `{name, confidence: float, tier, detail, entities}` — exactly the shape the gate emits — so
-  a null or non-numeric `confidence` is a 422 before any row is written. Nothing is stripped
-  from the record stored in `signal_event.record`.
+  a missing, null or non-numeric `confidence` is a 422 before any row is written. Nothing is
+  stripped from the record stored in `signal_event.record`. `confidence` has no default on
+  purpose: a default would compose with the mapper's confidence floor into a silent no-op
+  (202, no tag, a fabricated `0.0` on the stored record), so a DES bump that renamed or
+  dropped the field would turn the fraud path off with a green health check. The names the
+  floor does drop are logged (`app.risk.mapping`, INFO, with the `eventId`).
 
 ### Which engine runs
 

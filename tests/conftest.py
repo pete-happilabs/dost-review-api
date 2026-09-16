@@ -26,6 +26,9 @@ async def cleanup(pool):
     await pool.execute("DELETE FROM review")
     await pool.execute("DELETE FROM profile_reputation")
     await pool.execute("DELETE FROM batch_run")
+    for table in ("signal_event", "conversation_risk", "profile_risk",
+                  "outcome_event", "review_queue"):
+        await pool.execute(f"DELETE FROM {table}")
 
 
 @pytest_asyncio.fixture(loop_scope="session")

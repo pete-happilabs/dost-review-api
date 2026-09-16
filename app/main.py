@@ -9,7 +9,7 @@ from app.auth import verify_guard_key
 from app.batch_runner import sweep_stale_batches
 from app.config import settings
 from app.database import close_pool, create_onboard_pool, create_pool, run_migrations
-from app.routes import batch, health, reputation, reviews
+from app.routes import batch, health, outcomes, reputation, reviews, risk, signals
 from app.scheduler import start_scheduler, stop_scheduler
 
 # Configure logging
@@ -90,3 +90,6 @@ app.include_router(health.router)
 app.include_router(reviews.router)
 app.include_router(reputation.router)
 app.include_router(batch.router)
+app.include_router(signals.router)
+app.include_router(risk.router)
+app.include_router(outcomes.router)
